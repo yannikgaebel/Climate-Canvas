@@ -1,0 +1,291 @@
+<!-- public/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGL Application</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <script src="quadtree.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.heat/0.2.0/leaflet-heat.js"></script>
+
+</head>
+<body>
+    <h1>Clima Canves</h1>
+    
+    <div id="slider-container">
+        <span id="slider-label">Year-Month:</span>
+        <input type="range" id="display-slider" min="0" max="3238" step="1" value="0">
+        <span id="current-display-value">1743-11</span>
+    </div>
+
+    <div id="map"></div>
+    <script>
+        var map = L.map('map').setView([51.505, -0.09], 3);
+
+        var heatmapLayer = L.heatLayer([], {
+            radius: 200,
+            blur: 15,
+            max: 1.0,
+            maxZoom: 17,
+            opacity: 0.9,
+        }).addTo(map);
+
+
+        map.addLayer(heatmapLayer);
+
+        function interpolateColor(temperature) {
+
+            if (temperature === undefined || temperature === "x") {
+                return 'rgb(0, 0, 0)';
+            }
+
+            const minTemperature = -20;
+            const maxTemperature = 40;
+
+            const clampedTemperature = Math.max(minTemperature, Math.min(temperature, maxTemperature));
+
+            // Bereich der Farben festlegen
+            const minColor = [0, 0, 255]; // Dunkelblau
+            const midColor = [255, 255, 255]; // Weiß
+            //const midColor = [14, 247, 10]; // Grün
+            const maxColor = [255, 0, 0]; // Rot
+
+            // Interpolation berechnen
+            const ratio = (clampedTemperature - minTemperature) / (maxTemperature - minTemperature);
+            const interpolatedColor = interpolateNonLinear(minColor, midColor, maxColor, ratio);
+
+            return `rgb(${interpolatedColor[0]}, ${interpolatedColor[1]}, ${interpolatedColor[2]})`;
+        }
+
+        // Hilfsfunktion zur linearen Interpolation zwischen zwei RGB-Farben
+        function interpolateNonLinear(color1, color2, color3, t) {
+            // Verwende eine nicht-lineare Interpolation, zum Beispiel eine quadratische Interpolation
+            const invT = 1 - t;
+            const t2 = t * t;
+            const invT2 = invT * invT;
+
+            const result = [
+                Math.round(color1[0] * invT2 + color2[0] * 2 * invT * t + color3[0] * t2),
+                Math.round(color1[1] * invT2 + color2[1] * 2 * invT * t + color3[1] * t2),
+                Math.round(color1[2] * invT2 + color2[2] * 2 * invT * t + color3[2] * t2),
+            ];
+
+            return result;
+        }
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: ''
+        }).addTo(map);
+
+        // Funktion, um den dynamischen Radius zu berechnen
+        function getDynamicRadius(zoomLevel) {
+            return Math.max(Math.pow(2, 14 - zoomLevel) * 100, 5000);
+        }
+
+        const displaySlider = document.getElementById('display-slider');
+        const displayValueLabel = document.getElementById('current-display-value');
+
+        
+        const quadtreeBounds = { x: -180, y: -90, width: 360, height: 180 };
+        const maxPointsPerQuadtreeNode = 16;
+        const quadtree = new QuadtreeNode(quadtreeBounds, maxPointsPerQuadtreeNode);
+
+        const startDate = new Date('1743-11-01');
+
+        var csvFilePath = './data/processed_climate_data.csv';
+
+        console.log("Start PaPa");
+
+        const results = [];
+
+        Papa.parse(csvFilePath, {
+            download: true,
+            header: true,
+            complete: function(results) {
+                //console.log(results);
+                for (const item of results.data) {
+                    const latitude = parseFloat(item['Latitude']);
+                    const longitude = parseFloat(item['Longitude']);
+                    const city = item['City'];
+                    const temperatures_str = item['Temperature'];
+
+                    // Check if temperatures_str is undefined and skip if it is
+                    if (typeof temperatures_str === 'undefined' || temperatures_str === "") {
+                        console.log("Skipping entry with undefined temperatures:", item);
+                        continue; // Skip the rest of this loop iteration
+                    }
+
+                    const temperatures = temperatures_str
+                        .replace("[", "")
+                        .replace("]", "")
+                        .split(",")
+                        .map(Number);
+
+                    // console.log("Parsed temperatures: ", temperatures);
+
+                    // Insert the data into the quadtree
+                    quadtree.insert({ latitude, longitude, city, temperatures });
+                    // quadtree.insert({ latitude, longitude, city, temperatures: new Array(20).fill(20) });
+
+                }
+
+                const pointLayerGroup = L.layerGroup().addTo(map);
+
+                displaySlider.addEventListener('input', function() {
+                    const selectedValue =  parseInt(displaySlider.value);
+
+                    const currentDate = new Date(startDate);
+                    currentDate.setMonth(startDate.getMonth() + selectedValue);
+
+                    // Extrahiere das Jahr und den Monat
+                    const year = currentDate.getFullYear();
+                    const month = currentDate.getMonth() + 1; // Monate sind nullbasiert, daher +1
+
+                    // Aktualisiere die Anzeige
+                    displayValueLabel.textContent = `${year}-${month.toString().padStart(2, '0')}`;
+
+
+                    pointLayerGroup.eachLayer(layer => {
+                        if (layer instanceof L.Circle) {
+                            const point = layer.options; // Zugriff auf das ursprüngliche point-Objekt
+                            const temperature = point.temperatures[displaySlider.value];
+                            const color = interpolateColor(temperature);
+                            layer.setStyle({color: color, fillColor: color });
+                            layer.setPopupContent(getPopupContent(point));
+                        }
+                    });
+                })
+
+                function addPointsToLayerGroup(points) {
+                    pointLayerGroup.clearLayers(); // Entferne alle vorhandenen Layer
+
+                    points.forEach(point => {
+                        const { latitude, longitude, city, temperatures } = point;
+
+                        const radius = getDynamicRadius(map.getZoom());
+
+                        const color = interpolateColor(temperatures[displaySlider.value]);
+
+                        const circle = L.circle([latitude, longitude], {
+                            color: color,
+                            fillColor: color,
+                            fillOpacity: 0.8,
+                            radius: radius,
+                            city: city,
+                            temperatures: temperatures
+                        });
+
+
+                        circle.bindPopup(getPopupContent(point), { className: 'custom-popup' }).on('mouseover', function (e) {
+                            this.openPopup();
+                        }).on('mouseout', function (e) {
+                            this.closePopup();
+                        });
+
+                        // Füge den Kreis zur LayerGroup hinzu
+                        pointLayerGroup.addLayer(circle);
+                    });
+                }
+
+                function getPopupContent(point) {
+                    const sliderValue = document.getElementById('display-slider').value;
+                    const temperature = point.temperatures[sliderValue];
+                    const temperatureRounded = Math.round(temperature);
+
+                    return `
+                        <div>${point.city}</div>
+                        <div>Temperatur: ${temperatureRounded}°C</div>
+                    `;
+                }
+
+                function getRandomSubset(points, maxCount) {
+                    const shuffledPoints = points.slice().sort(() => Math.random() - 0.5);
+                    return shuffledPoints.slice(0, Math.min(maxCount, shuffledPoints.length));
+                }
+
+                function getEvenlyDistributedPoints(points, maxCount) {
+                    const distributedPoints = [];
+                    const step = Math.ceil(points.length / maxCount);
+
+                    for (let i = 0; i < points.length; i += step) {
+                        distributedPoints.push(points[i]);
+                    }
+
+                    return distributedPoints;
+                }
+
+                function updatePointsOnMove() {
+                    // Erhalte die Grenzen (Bounds) der aktuellen Ansicht
+                    const bounds = map.getBounds();
+
+                    // Extrahiere die Koordinaten der Grenzen
+                    const southWest = bounds.getSouthWest(); // Südwest-Koordinate
+                    const northEast = bounds.getNorthEast(); // Nordost-Koordinate
+
+                    // Beispiel: Erstelle ein Rechteck mit den Grenzen
+                    const searchRange = {
+                        x: southWest.lng,
+                        y: southWest.lat,
+                        width: northEast.lng - southWest.lng,
+                        height: northEast.lat - southWest.lat
+                    };
+
+                    const pointsInSearchRange = [];
+                    quadtree.queryRange(searchRange, pointsInSearchRange);
+
+                    // Begrenze die Anzahl der Punkte auf maximal 50
+                    const evenlyDistributedPoints = getEvenlyDistributedPoints(pointsInSearchRange, 100);
+
+                    addPointsToLayerGroup(evenlyDistributedPoints);
+                    //console.log("Points new: ", evenlyDistributedPoints);
+
+                    console.log("Update points on move");
+                }
+
+                document.addEventListener('keydown', function(event) {
+                    const key = event.key;
+                    const displaySlider = document.getElementById('display-slider'); 
+                    const currentValue = parseInt(displaySlider.value); 
+
+                    switch(key) {
+                        case 'ArrowRight': 
+                            displaySlider.value = Math.min(currentValue + 1, displaySlider.max); 
+                            break;
+                        case 'ArrowLeft': 
+                            displaySlider.value = Math.max(currentValue - 1, displaySlider.min); 
+                            break;
+                    }
+                    
+                    // Trigger the input event on the slider after updating its value
+                    const eventInput = new Event('input', { bubbles: true });
+                    displaySlider.dispatchEvent(eventInput);
+                });
+
+
+                map.on('moveend', updatePointsOnMove);
+                //map.on('zoomend', updateHeatmap);
+                console.log("Start drawing circles");
+
+                
+                updatePointsOnMove()
+            }
+        });
+   
+        //ZOOM BUTTON BOTTOM RIGHT and REMOVE TOP LEFT
+        map.zoomControl.remove();
+        map.on('load', function() {
+            // Ensure the map is fully loaded before initializing points
+            updatePointsOnMove();
+        });
+        L.control.zoom({
+            position: 'bottomright'
+        }).addTo(map);
+    </script>
+    <script src="app.js"></script>
+</body>
+</html>
+
